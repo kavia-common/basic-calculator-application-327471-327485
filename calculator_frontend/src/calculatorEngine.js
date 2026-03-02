@@ -11,14 +11,28 @@
  * - Output:
  *   - { state: CalculatorState } on success
  *   - { state: CalculatorState, error: CalculatorEngineError } on validation/evaluation failure
- * - Errors:
- *   - DIVIDE_BY_ZERO: attempted division by zero
- *   - MALFORMED_EXPRESSION: invalid token sequence (e.g., "1++2", "1..2", "=", "1+")
- *   - UNKNOWN_INPUT: unknown input type
- * - Side effects: none (no DOM, no storage, no Date, no randomness)
+ * - Determinism:
+ *   - No side effects (no DOM, no storage, no Date, no randomness)
+ *   - Same {state,input} => same output always
  *
- * Debuggability:
- * - Deterministic transitions; callers can log {input, prevState, nextState, error}
+ * Error-state rules (deterministic guardrails):
+ * - When status === 'error':
+ *   - digit or decimal: starts a fresh expression (clears error) with that input
+ *   - clear: resets to initial
+ *   - backspace: resets to initial (common calc behavior)
+ *   - operator/equal: no-op (state unchanged) and returns an error object (predictable)
+ *
+ * Operator/equals rules:
+ * - Repeated operators: last operator is replaced (e.g., "1 + *" becomes "1 *")
+ * - Equals requires a complete expression:
+ *   - "1 +" then "=" => error (malformed expression)
+ *   - "=" on a single number:
+ *       - if lastEqual exists (from a previous evaluation), repeats it (e.g., "2 + 3 =" gives 5, then "=" gives 8)
+ *       - otherwise no-op (keeps current number as result)
+ *
+ * Display:
+ * - status === 'error': display errorMessage
+ * - otherwise: tokens joined by spaces
  */
 
 /**
@@ -45,17 +59,19 @@
  * @typedef {{
  *   tokens: string[],
  *   status: 'ready'|'result'|'error',
- *   errorMessage: string|null
+ *   errorMessage: string|null,
+ *   lastEqual: null | { op: string, rhs: number }
  * }} CalculatorState
  *
- * Notes:
+ * Invariants:
  * - tokens represent an expression of the form: number (operator number)*
- * - numbers are strings like "12", "0.5", ".5" (we normalize ".5" to "0.5" at evaluation time).
- * - operators are one of '+', '-', '*', '/'.
- * - status:
- *   - 'ready': normal input mode
- *   - 'result': last action was equal; digits start new expression; operator continues from result
- *   - 'error': last action produced an error; next digit/decimal clears and starts over
+ * - operators are one of '+', '-', '*', '/'
+ * - numbers are strings like "12", "0.5", "0.", ".5" (".5" normalized at parse time)
+ * - In ready mode:
+ *   - tokens never empty
+ *   - tokens never contains two operators in a row (operators are replaced)
+ * - In result mode:
+ *   - tokens is a single formatted number token (the result)
  */
 
 const OPERATORS = new Set(['+', '-', '*', '/']);
@@ -70,6 +86,7 @@ export function createInitialCalculatorState() {
     tokens: ['0'],
     status: 'ready',
     errorMessage: null,
+    lastEqual: null,
   };
 }
 
@@ -80,11 +97,12 @@ export function createInitialCalculatorState() {
  * @returns {string}
  */
 export function getCalculatorDisplay(state) {
-  if (state.status === 'error') {
-    return state.errorMessage || 'Error';
+  const safe = normalizeState(state);
+  if (safe.status === 'error') {
+    return safe.errorMessage || 'Error';
   }
-  if (!state.tokens || state.tokens.length === 0) return '0';
-  return state.tokens.join(' ');
+  if (!safe.tokens || safe.tokens.length === 0) return '0';
+  return safe.tokens.join(' ');
 }
 
 /**
@@ -96,6 +114,11 @@ export function getCalculatorDisplay(state) {
  */
 export function transitionCalculator(state, input) {
   const safeState = normalizeState(state);
+
+  // Centralized error-state gating: only some inputs are allowed to recover.
+  if (safeState.status === 'error') {
+    return transitionFromErrorState(safeState, input);
+  }
 
   switch (input?.type) {
     case 'clear':
@@ -117,14 +140,7 @@ export function transitionCalculator(state, input) {
       return evaluateEqual(safeState);
 
     default:
-      return {
-        state: {
-          ...safeState,
-          status: 'error',
-          errorMessage: 'Unknown input',
-        },
-        error: { code: 'UNKNOWN_INPUT', message: 'Unknown input type' },
-      };
+      return toError(safeState, 'UNKNOWN_INPUT', 'Unknown input');
   }
 }
 
@@ -137,10 +153,59 @@ function normalizeState(state) {
   const status = state.status === 'result' || state.status === 'error' ? state.status : 'ready';
   const tokens = state.tokens.length > 0 ? state.tokens.slice() : ['0'];
 
+  // Normalize lastEqual shape.
+  const lastEqual =
+    state.lastEqual && typeof state.lastEqual === 'object'
+      ? {
+          op: typeof state.lastEqual.op === 'string' ? state.lastEqual.op : '',
+          rhs: Number(state.lastEqual.rhs),
+        }
+      : null;
+
   return {
     tokens,
     status,
     errorMessage: status === 'error' ? state.errorMessage || 'Error' : null,
+    lastEqual: lastEqual && OPERATORS.has(lastEqual.op) && Number.isFinite(lastEqual.rhs) ? lastEqual : null,
+  };
+}
+
+function transitionFromErrorState(state, input) {
+  switch (input?.type) {
+    case 'clear':
+      return { state: createInitialCalculatorState() };
+    case 'backspace':
+      return { state: createInitialCalculatorState() };
+    case 'digit':
+      // Digit starts fresh after error.
+      return { state: applyDigit({ ...createInitialCalculatorState(), status: 'ready' }, input.digit) };
+    case 'decimal':
+      // Decimal starts fresh after error as "0."
+      return { state: { tokens: ['0.'], status: 'ready', errorMessage: null, lastEqual: null } };
+    case 'operator':
+      return {
+        state,
+        error: { code: 'MALFORMED_EXPRESSION', message: 'Operator not allowed after error; clear or start with a digit' },
+      };
+    case 'equal':
+      return {
+        state,
+        error: { code: 'MALFORMED_EXPRESSION', message: 'Equals not allowed after error; clear or start with a digit' },
+      };
+    default:
+      return toError(state, 'UNKNOWN_INPUT', 'Unknown input');
+  }
+}
+
+function toError(state, code, message, displayMessage) {
+  return {
+    state: {
+      ...state,
+      status: 'error',
+      errorMessage: displayMessage || message,
+      lastEqual: null,
+    },
+    error: { code, message },
   };
 }
 
@@ -157,36 +222,37 @@ function isNumberToken(tok) {
 }
 
 function applyBackspace(state) {
-  // If error/result, backspace behaves like clear-to-0 (common calculator behavior).
-  if (state.status === 'error' || state.status === 'result') {
+  // If result, backspace behaves like clear-to-0.
+  if (state.status === 'result') {
     return createInitialCalculatorState();
   }
 
   const tokens = state.tokens.slice();
   const last = tokens[tokens.length - 1];
 
+  // If last is operator, remove it.
   if (isOperatorToken(last)) {
     tokens.pop();
-  } else {
-    // number token
-    const updated = last.slice(0, -1);
-    if (
-      updated.length === 0 ||
-      updated === '-' ||
-      updated === '.' ||
-      updated === '-.'
-    ) {
-      // If number becomes empty/invalid, drop it; ensure expression doesn't become empty.
+    if (tokens.length === 0) tokens.push('0');
+    return { ...state, tokens, status: 'ready', errorMessage: null };
+  }
+
+  // last is number
+  const updated = last.slice(0, -1);
+
+  if (updated.length === 0 || updated === '-' || updated === '.' || updated === '-.') {
+    tokens.pop();
+
+    // If expression becomes empty, reset to 0.
+    if (tokens.length === 0) tokens.push('0');
+
+    // If we popped a number and now last is operator, remove dangling operator too.
+    if (tokens.length > 0 && isOperatorToken(tokens[tokens.length - 1])) {
       tokens.pop();
       if (tokens.length === 0) tokens.push('0');
-      // If we popped a number and now last is operator, remove dangling operator too.
-      if (tokens.length > 0 && isOperatorToken(tokens[tokens.length - 1])) {
-        tokens.pop();
-        if (tokens.length === 0) tokens.push('0');
-      }
-    } else {
-      tokens[tokens.length - 1] = updated;
     }
+  } else {
+    tokens[tokens.length - 1] = updated;
   }
 
   return { ...state, tokens, status: 'ready', errorMessage: null };
@@ -194,21 +260,18 @@ function applyBackspace(state) {
 
 function applyDigit(state, digit) {
   if (!isDigitChar(digit)) {
+    // Treat as malformed expression rather than unknown input, because UI only sends valid digits.
     return {
       ...state,
       status: 'error',
       errorMessage: 'Malformed input',
+      lastEqual: null,
     };
-  }
-
-  // If prior was error, digit starts fresh.
-  if (state.status === 'error') {
-    return { tokens: [digit], status: 'ready', errorMessage: null };
   }
 
   // If prior was result, digit starts a new expression.
   if (state.status === 'result') {
-    return { tokens: [digit], status: 'ready', errorMessage: null };
+    return { tokens: [digit], status: 'ready', errorMessage: null, lastEqual: null };
   }
 
   const tokens = state.tokens.slice();
@@ -222,8 +285,6 @@ function applyDigit(state, digit) {
   // last is number
   if (last === '0') {
     tokens[tokens.length - 1] = digit; // replace leading 0
-  } else if (last === '-0') {
-    tokens[tokens.length - 1] = `-${digit}`;
   } else {
     tokens[tokens.length - 1] = last + digit;
   }
@@ -232,14 +293,9 @@ function applyDigit(state, digit) {
 }
 
 function applyDecimal(state) {
-  // If prior was error, start "0."
-  if (state.status === 'error') {
-    return { state: { tokens: ['0.'], status: 'ready', errorMessage: null } };
-  }
-
   // If prior was result, start new expression with "0."
   if (state.status === 'result') {
-    return { state: { tokens: ['0.'], status: 'ready', errorMessage: null } };
+    return { state: { tokens: ['0.'], status: 'ready', errorMessage: null, lastEqual: null } };
   }
 
   const tokens = state.tokens.slice();
@@ -252,10 +308,12 @@ function applyDecimal(state) {
 
   // last is number
   if (last.includes('.')) {
-    return {
-      state: { ...state, tokens, status: 'error', errorMessage: 'Malformed number' },
-      error: { code: 'MALFORMED_EXPRESSION', message: 'Multiple decimals in a number' },
-    };
+    return toError(
+      { ...state, tokens },
+      'MALFORMED_EXPRESSION',
+      'Multiple decimals in a number',
+      'Malformed number'
+    );
   }
 
   tokens[tokens.length - 1] = last + '.';
@@ -265,41 +323,32 @@ function applyDecimal(state) {
 function applyOperator(state, operator) {
   const opToken = operatorToToken(operator);
   if (!opToken) {
-    return {
-      state: { ...state, status: 'error', errorMessage: 'Unknown operator' },
-      error: { code: 'UNKNOWN_INPUT', message: 'Unknown operator' },
-    };
+    return toError(state, 'UNKNOWN_INPUT', 'Unknown operator', 'Unknown operator');
   }
 
-  // If we are in error, operator cannot apply (user should clear or start over with digits).
-  if (state.status === 'error') {
-    return {
-      state,
-      error: { code: 'MALFORMED_EXPRESSION', message: 'Operator not allowed after error' },
-    };
-  }
-
+  // If we are in result, we are continuing from a single result token.
+  // (If lastEqual exists, we keep it: operator changes the expression and ends the repeat-equals chain.)
   const tokens = state.tokens.slice();
   const last = tokens[tokens.length - 1];
 
-  // If last action was "result", we allow continuing from the result.
-  // This is naturally handled because tokens already contain a single number.
-  // If last token is operator, replace it (avoid malformed "1 + *").
+  // Replace repeated operators deterministically.
   if (isOperatorToken(last)) {
     tokens[tokens.length - 1] = opToken;
-    return { state: { ...state, tokens, status: 'ready', errorMessage: null } };
+    return { state: { ...state, tokens, status: 'ready', errorMessage: null, lastEqual: null } };
   }
 
   // Validate last number isn't a dangling decimal like "1."
   if (isNumberToken(last) && last.endsWith('.')) {
-    return {
-      state: { ...state, status: 'error', errorMessage: 'Malformed number' },
-      error: { code: 'MALFORMED_EXPRESSION', message: 'Number cannot end with decimal point' },
-    };
+    return toError(
+      state,
+      'MALFORMED_EXPRESSION',
+      'Number cannot end with decimal point',
+      'Malformed number'
+    );
   }
 
   tokens.push(opToken);
-  return { state: { ...state, tokens, status: 'ready', errorMessage: null } };
+  return { state: { ...state, tokens, status: 'ready', errorMessage: null, lastEqual: null } };
 }
 
 function operatorToToken(operator) {
@@ -318,41 +367,53 @@ function operatorToToken(operator) {
 }
 
 function evaluateEqual(state) {
-  if (state.status === 'error') {
-    return { state };
+  // If user hits "=" right after getting a result, we optionally repeat the last operation.
+  if (state.status === 'result') {
+    return evaluateRepeatEqual(state);
   }
 
-  // Expression must end with a number
   const tokens = state.tokens.slice();
   const last = tokens[tokens.length - 1];
 
   if (tokens.length === 0) {
+    return toError(state, 'MALFORMED_EXPRESSION', 'Empty expression', 'Malformed expression');
+  }
+
+  // "=" on a single number in ready mode:
+  // - if we have a lastEqual, allow repeating it (rare but can happen if caller mutated status)
+  // - otherwise treat it as "confirm" and switch to result.
+  if (tokens.length === 1 && isNumberToken(last)) {
+    if (isNumberToken(last) && last.endsWith('.')) {
+      return toError(state, 'MALFORMED_EXPRESSION', 'Number cannot end with decimal point', 'Malformed number');
+    }
+
+    if (state.lastEqual) {
+      // Repeat previous operation from current number.
+      return evaluateRepeatEqual({ ...state, status: 'result' });
+    }
+
     return {
-      state: { ...state, status: 'error', errorMessage: 'Malformed expression' },
-      error: { code: 'MALFORMED_EXPRESSION', message: 'Empty expression' },
+      state: {
+        tokens: [normalizeNumberTokenForResult(last)],
+        status: 'result',
+        errorMessage: null,
+        lastEqual: null,
+      },
     };
   }
 
+  // Expression must end with a number.
   if (isOperatorToken(last)) {
-    return {
-      state: { ...state, status: 'error', errorMessage: 'Malformed expression' },
-      error: { code: 'MALFORMED_EXPRESSION', message: 'Expression cannot end with operator' },
-    };
+    return toError(state, 'MALFORMED_EXPRESSION', 'Expression cannot end with operator', 'Malformed expression');
   }
 
   if (isNumberToken(last) && last.endsWith('.')) {
-    return {
-      state: { ...state, status: 'error', errorMessage: 'Malformed number' },
-      error: { code: 'MALFORMED_EXPRESSION', message: 'Number cannot end with decimal point' },
-    };
+    return toError(state, 'MALFORMED_EXPRESSION', 'Number cannot end with decimal point', 'Malformed number');
   }
 
   const parsed = parseTokens(tokens);
   if (!parsed.ok) {
-    return {
-      state: { ...state, status: 'error', errorMessage: 'Malformed expression' },
-      error: { code: 'MALFORMED_EXPRESSION', message: parsed.message },
-    };
+    return toError(state, 'MALFORMED_EXPRESSION', parsed.message, 'Malformed expression');
   }
 
   const evalResult = evalWithPrecedence(parsed.numbers, parsed.ops);
@@ -361,21 +422,96 @@ function evaluateEqual(state) {
       state: {
         ...state,
         status: 'error',
-        errorMessage:
-          evalResult.code === 'DIVIDE_BY_ZERO' ? 'Divide by zero' : 'Malformed expression',
+        errorMessage: evalResult.code === 'DIVIDE_BY_ZERO' ? 'Divide by zero' : 'Malformed expression',
+        lastEqual: null,
       },
       error: { code: evalResult.code, message: evalResult.message },
     };
   }
 
   const formatted = formatNumberForToken(evalResult.value);
+
+  // Store "repeat equals" payload from the last binary operation in the expression:
+  // expression: a op b op c ... => after evaluation, repeating "=" applies (lastOp, lastRhs) to current result.
+  const lastOp = parsed.ops[parsed.ops.length - 1] || null;
+  const lastRhs = parsed.numbers[parsed.numbers.length - 1];
+  const lastEqual = lastOp ? { op: lastOp, rhs: lastRhs } : null;
+
   return {
     state: {
       tokens: [formatted],
       status: 'result',
       errorMessage: null,
+      lastEqual,
     },
   };
+}
+
+function evaluateRepeatEqual(state) {
+  // Deterministic repeated "=" behavior:
+  // - If we have lastEqual => apply it to current value.
+  // - Otherwise => no-op.
+  const tokens = state.tokens.slice();
+  const only = tokens[0];
+
+  const currentToken = typeof only === 'string' && only.length ? only : '0';
+  const currentParsed = Number(normalizeNumberString(currentToken));
+  if (!Number.isFinite(currentParsed)) {
+    return toError(state, 'MALFORMED_EXPRESSION', 'Invalid current result', 'Malformed expression');
+  }
+
+  if (!state.lastEqual) {
+    // No repeat operation captured; keep as-is.
+    return {
+      state: { ...state, tokens: [formatNumberForToken(currentParsed)], status: 'result', errorMessage: null },
+    };
+  }
+
+  const { op, rhs } = state.lastEqual;
+
+  if (op === '/' && rhs === 0) {
+    return {
+      state: { ...state, status: 'error', errorMessage: 'Divide by zero', lastEqual: null },
+      error: { code: 'DIVIDE_BY_ZERO', message: 'Attempted division by zero' },
+    };
+  }
+
+  const nextValue = applyBinaryOp(currentParsed, op, rhs);
+  if (!Number.isFinite(nextValue)) {
+    return toError(state, 'MALFORMED_EXPRESSION', 'Non-finite result', 'Malformed expression');
+  }
+
+  return {
+    state: {
+      tokens: [formatNumberForToken(nextValue)],
+      status: 'result',
+      errorMessage: null,
+      lastEqual: state.lastEqual,
+    },
+  };
+}
+
+function applyBinaryOp(a, op, b) {
+  switch (op) {
+    case '+':
+      return a + b;
+    case '-':
+      return a - b;
+    case '*':
+      return a * b;
+    case '/':
+      return a / b;
+    default:
+      return NaN;
+  }
+}
+
+function normalizeNumberTokenForResult(tok) {
+  // Ensure result token isn't something like ".5" or "-.5" (engine accepts it, but results should be normalized).
+  const normalizedStr = normalizeNumberString(tok);
+  const n = Number(normalizedStr);
+  if (!Number.isFinite(n)) return '0';
+  return formatNumberForToken(n);
 }
 
 function parseTokens(tokens) {
