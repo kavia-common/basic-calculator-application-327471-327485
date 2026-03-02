@@ -26,21 +26,12 @@
  */
 
 /**
- * @typedef {{
- *   type: 'digit',
- *   digit: string
- * } | {
- *   type: 'operator',
- *   operator: Operator
- * } | {
- *   type: 'decimal'
- * } | {
- *   type: 'clear'
- * } | {
- *   type: 'backspace'
- * } | {
- *   type: 'equal'
- * }} CalculatorInput
+ * @typedef {{type:'digit',digit:string}
+ * | {type:'operator',operator:Operator}
+ * | {type:'decimal'}
+ * | {type:'clear'}
+ * | {type:'backspace'}
+ * | {type:'equal'}} CalculatorInput
  */
 
 /**
@@ -179,8 +170,12 @@ function applyBackspace(state) {
   } else {
     // number token
     const updated = last.slice(0, -1);
-    if (updated.length === 0 || updated === '-' || updated === '.'
-      || updated === '-.') {
+    if (
+      updated.length === 0 ||
+      updated === '-' ||
+      updated === '.' ||
+      updated === '-.'
+    ) {
       // If number becomes empty/invalid, drop it; ensure expression doesn't become empty.
       tokens.pop();
       if (tokens.length === 0) tokens.push('0');
@@ -363,7 +358,12 @@ function evaluateEqual(state) {
   const evalResult = evalWithPrecedence(parsed.numbers, parsed.ops);
   if (!evalResult.ok) {
     return {
-      state: { ...state, status: 'error', errorMessage: evalResult.code === 'DIVIDE_BY_ZERO' ? 'Divide by zero' : 'Malformed expression' },
+      state: {
+        ...state,
+        status: 'error',
+        errorMessage:
+          evalResult.code === 'DIVIDE_BY_ZERO' ? 'Divide by zero' : 'Malformed expression',
+      },
       error: { code: evalResult.code, message: evalResult.message },
     };
   }
