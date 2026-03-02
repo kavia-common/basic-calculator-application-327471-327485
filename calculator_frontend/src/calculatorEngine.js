@@ -52,25 +52,19 @@
 
 /**
  * @typedef {{
- *   /**
- *    * Invariant: tokens represent an expression of the form:
- *    *   number (operator number)*
- *    * where number is a string like "12", "0.5", ".5" (we normalize ".5" to "0.5" at evaluation time).
- *    * Operators are one of '+', '-', '*', '/'.
- *    */
  *   tokens: string[],
- *   /**
- *    * Optional engine status for the UI.
- *    * - 'ready': normal input mode
- *    * - 'result': last action was equal; digits start new expression; operator continues from result
- *    * - 'error': last action produced an error; next digit/decimal clears and starts over
- *    */
  *   status: 'ready'|'result'|'error',
- *   /**
- *    * User-visible error message (if status === 'error')
- *    */
  *   errorMessage: string|null
  * }} CalculatorState
+ *
+ * Notes:
+ * - tokens represent an expression of the form: number (operator number)*
+ * - numbers are strings like "12", "0.5", ".5" (we normalize ".5" to "0.5" at evaluation time).
+ * - operators are one of '+', '-', '*', '/'.
+ * - status:
+ *   - 'ready': normal input mode
+ *   - 'result': last action was equal; digits start new expression; operator continues from result
+ *   - 'error': last action produced an error; next digit/decimal clears and starts over
  */
 
 const OPERATORS = new Set(['+', '-', '*', '/']);
