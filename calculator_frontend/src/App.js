@@ -42,13 +42,22 @@ const BUTTON_ROWS = [
   ],
 ];
 
+function getButtonVariantClass(buttonKey) {
+  if (buttonKey === 'clear') return 'calc-btn calc-btn--danger calc-btn--wide';
+  if (buttonKey === 'backspace') return 'calc-btn calc-btn--danger';
+  if (buttonKey === 'equal') return 'calc-btn calc-btn--primary';
+  if (['divide', 'mul', 'sub', 'add'].includes(buttonKey)) return 'calc-btn calc-btn--operator';
+  if (buttonKey === '0') return 'calc-btn calc-btn--wide';
+  return 'calc-btn';
+}
+
 // PUBLIC_INTERFACE
 function App() {
   /** Engine-owned calculator state. */
   const [calcState, setCalcState] = useState(() => createInitialCalculatorState());
 
-  /** Local UI error (optional): we primarily rely on engine's display/status. */
   const displayValue = useMemo(() => getCalculatorDisplay(calcState), [calcState]);
+  const hasError = calcState.status === 'error';
 
   const applyInput = useCallback((input) => {
     setCalcState((prev) => {
@@ -131,107 +140,56 @@ function App() {
     <div className="App">
       {/* Main landmark for accessibility */}
       <main className="App-header" aria-label="Calculator" onKeyDown={handleKeyDown}>
-        <section aria-label="Calculator display" style={{ width: 'min(360px, 92vw)' }}>
+        <section className="calculator" aria-label="Calculator">
           <div
+            className={`calculator__display ${hasError ? 'is-error' : ''}`}
             role="status"
             aria-live="polite"
             aria-atomic="true"
             aria-label="Display"
-            // Visual styling will be handled in later CSS updates; this ensures usable layout now.
-            style={{
-              background: 'var(--bg-secondary)',
-              border: '1px solid var(--border-color)',
-              borderRadius: 12,
-              padding: '16px 14px',
-              textAlign: 'right',
-              fontSize: 28,
-              fontWeight: 600,
-              minHeight: 64,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'flex-end',
-              overflow: 'hidden',
-              userSelect: 'none',
-            }}
           >
-            <span style={{ width: '100%', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {displayValue}
-            </span>
+            <div className="calculator__displayValue">{displayValue}</div>
+            <div className="calculator__displayHint">
+              {hasError ? 'Press C to clear' : 'Type with keyboard or tap buttons'}
+            </div>
           </div>
 
-          {/* Keypad */}
-          <div
-            aria-label="Calculator keypad"
-            style={{
-              marginTop: 14,
-              display: 'grid',
-              gridTemplateColumns: 'repeat(4, 1fr)',
-              gap: 10,
-            }}
-          >
-            {/* Row 1 (3 buttons) */}
+          <div className="calculator__keypad" aria-label="Calculator keypad">
+            {/* Row 1: Clear spans two columns */}
             {BUTTON_ROWS[0].map((b) => (
               <button
                 key={b.key}
                 type="button"
                 aria-label={b.ariaLabel}
+                className={getButtonVariantClass(b.key)}
                 onClick={() => applyInput(b.input)}
-                style={{
-                  gridColumn: b.key === 'clear' ? 'span 2' : 'auto',
-                  padding: '14px 12px',
-                  fontSize: 18,
-                  fontWeight: 700,
-                  borderRadius: 10,
-                  border: '1px solid var(--border-color)',
-                  background: 'var(--button-bg)',
-                  color: 'var(--button-text)',
-                  cursor: 'pointer',
-                }}
               >
                 {b.label}
               </button>
             ))}
 
-            {/* Fill the missing 4th column in row 1 by making Clear span 2 columns */}
-            {/* Remaining rows */}
-            {BUTTON_ROWS.slice(1, 4).flat().map((b) => (
-              <button
-                key={b.key}
-                type="button"
-                aria-label={b.ariaLabel}
-                onClick={() => applyInput(b.input)}
-                style={{
-                  padding: '14px 12px',
-                  fontSize: 18,
-                  fontWeight: 700,
-                  borderRadius: 10,
-                  border: '1px solid var(--border-color)',
-                  background: 'var(--bg-secondary)',
-                  color: 'var(--text-primary)',
-                  cursor: 'pointer',
-                }}
-              >
-                {b.label}
-              </button>
-            ))}
+            {/* Rows 2-4 */}
+            {BUTTON_ROWS.slice(1, 4)
+              .flat()
+              .map((b) => (
+                <button
+                  key={b.key}
+                  type="button"
+                  aria-label={b.ariaLabel}
+                  className={getButtonVariantClass(b.key)}
+                  onClick={() => applyInput(b.input)}
+                >
+                  {b.label}
+                </button>
+              ))}
 
-            {/* Last row: make 0 span 2 columns to look like typical calculators */}
+            {/* Last row: 0 spans two columns */}
             <button
               key="0"
               type="button"
               aria-label="0"
+              className={getButtonVariantClass('0')}
               onClick={() => applyInput({ type: 'digit', digit: '0' })}
-              style={{
-                gridColumn: 'span 2',
-                padding: '14px 12px',
-                fontSize: 18,
-                fontWeight: 700,
-                borderRadius: 10,
-                border: '1px solid var(--border-color)',
-                background: 'var(--bg-secondary)',
-                color: 'var(--text-primary)',
-                cursor: 'pointer',
-              }}
             >
               0
             </button>
@@ -240,17 +198,8 @@ function App() {
               key="decimal"
               type="button"
               aria-label="Decimal point"
+              className={getButtonVariantClass('decimal')}
               onClick={() => applyInput({ type: 'decimal' })}
-              style={{
-                padding: '14px 12px',
-                fontSize: 18,
-                fontWeight: 700,
-                borderRadius: 10,
-                border: '1px solid var(--border-color)',
-                background: 'var(--bg-secondary)',
-                color: 'var(--text-primary)',
-                cursor: 'pointer',
-              }}
             >
               .
             </button>
@@ -259,17 +208,8 @@ function App() {
               key="equal"
               type="button"
               aria-label="Equals"
+              className={getButtonVariantClass('equal')}
               onClick={() => applyInput({ type: 'equal' })}
-              style={{
-                padding: '14px 12px',
-                fontSize: 18,
-                fontWeight: 700,
-                borderRadius: 10,
-                border: '1px solid var(--border-color)',
-                background: 'var(--button-bg)',
-                color: 'var(--button-text)',
-                cursor: 'pointer',
-              }}
             >
               =
             </button>
